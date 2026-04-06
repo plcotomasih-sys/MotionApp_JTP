@@ -5,8 +5,8 @@ import time
 from PySide6.QtCore import QObject, Signal, QTimer
 from pymodbus.client.sync import ModbusTcpClient
 from pymodbus.exceptions import ModbusException
-# try github
-# second try
+from pymodbus.payload import BinaryPayloadBuilder
+from pymodbus.constants import Endian
 
 class PLCConnection(QObject):
     """Industrial PLC Connection dengan 3-level monitoring"""
@@ -29,15 +29,15 @@ class PLCConnection(QObject):
         
         # 3-Level Monitoring Configuration
         # Level 1: Quick Check (200ms)
-        self.quick_check_interval = 200      # ms
+        self.quick_check_interval = 1000      # ms
         self.quick_check_timeout = 3         # 3x gagal = warning
         
         # Level 2: Heartbeat (1s)
-        self.heartbeat_interval = 1000       # ms
+        self.heartbeat_interval = 2000       # ms
         self.heartbeat_timeout = 3           # 3x gagal = safety
         
         # Level 3: Safety Timeout (3s)
-        self.safety_timeout = 3000           # ms
+        self.safety_timeout = 10000           # ms
         
         # Counters
         self.quick_check_failures = 0
@@ -72,6 +72,186 @@ class PLCConnection(QObject):
         self.config_file = "plc_config.json"
         self.load_config()
         
+    def write_servo_positions(self, servo1, servo2, servo3):
+        """
+        Write servo positions ke PLC sebagai REAL (32-bit float)
+        Sesuai konfigurasi:
+        - ServoTargetPos[0]: address 2569-2570
+        - ServoTargetPos[1]: address 2571-2572
+        - ServoTargetPos[2]: address 2573-2574
+        """
+        # Validasi nilai
+        servo1 = max(0, min(1000, servo1))
+        servo2 = max(0, min(1000, servo2))
+        servo3 = max(0, min(1000, servo3))
+        
+        # Konversi ke float (REAL)
+        # Asumsi: PLC menerima nilai 0.0 - 1000.0 (atau 0.0 - 1.0)
+        # Sesuaikan dengan kebutuhan. Dari konfigurasi, nilai 7e-43 dan 8.96e-38 menunjukkan 
+        # nilai float yang sangat kecil, kemungkinan range 0.0 - 1000.0
+        
+        # Opsi 1: Kirim langsung nilai integer sebagai float
+        values = [
+            float(servo1),  # 0.0 - 1000.0
+            float(servo2),
+            float(servo3)
+        ]
+        
+        # Opsi 2: Jika PLC menggunakan range 0.0 - 1.0
+        # values = [
+        #     servo1 / 1000.0,
+        #     servo2 / 1000.0,
+        #     servo3 / 1000.0
+        # ]
+        
+        try:
+            from pymodbus.payload import BinaryPayloadBuilder
+            from pymodbus.constants import Endian
+            
+            # Buat builder dengan format yang sesuai
+            # REAL (32-bit float) = 2 register per nilai
+            builder = BinaryPayloadBuilder(
+                byteorder=Endian.Big,    # Big Endian untuk byte
+                wordorder=Endian.Little  # Little Endian untuk word
+            )
+            
+            # Tambahkan semua nilai float
+            for v in values:
+                builder.add_32bit_float(v)
+            
+            # Konversi ke register
+            payload = builder.to_registers()
+            
+            # Alamat awal array (ServoTargetPos[0])
+            # Dari konfigurasi: 4X2569, dalam zero-based addressing = 2568
+            start_address = 2568  # karena Modbus address 4X2569 = 2568 (0-based)
+            
+            # print(f"[PLC] Writing servo values: {values}")
+            # print(f"[PLC] Payload registers: {payload}")
+            # print(f"[PLC] Start address: {start_address}")
+            
+            # Tulis ke PLC
+            result = self.client.write_registers(
+                start_address,
+                payload,
+                unit=self.unit_id
+            )
+            
+            if result.isError():
+                print(f"[PLC] Write servo failed: {result}")
+                return False
+            else:
+                # print(f"[PLC] Write successful")
+                
+                # Verifikasi dengan membaca kembali
+                read_result = self.client.read_holding_registers(
+                    start_address, 6, unit=self.unit_id
+                )
+                
+                if not read_result.isError():
+                    # print(f"[PLC] Read back registers: {read_result.registers}")
+                    
+                    # Konversi balik ke float untuk verifikasi
+                    from pymodbus.payload import BinaryPayloadDecoder
+                    
+                    decoder = BinaryPayloadDecoder.fromRegisters(
+                        read_result.registers,
+                        byteorder=Endian.Big,
+                        wordorder=Endian.Little
+                    )
+                    
+                    read_servo1 = decoder.decode_32bit_float()
+                    read_servo2 = decoder.decode_32bit_float()
+                    read_servo3 = decoder.decode_32bit_float()
+                    
+                    # print(f"[PLC] Read back values: {read_servo1:.2f}, {read_servo2:.2f}, {read_servo3:.2f}")
+                    
+                    # Cek apakah nilai sesuai
+                    # if (abs(read_servo1 - values[0]) < 0.01 and
+                    #     abs(read_servo2 - values[1]) < 0.01 and
+                    #     abs(read_servo3 - values[2]) < 0.01):
+                    #     print("[PLC] ✓ Verification passed")
+                    # else:
+                    #     print("[PLC] ⚠ Verification failed - values mismatch")
+                
+                return True
+                    
+        except Exception as e:
+            print(f"[PLC] Exception in write_servo_positions: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def write_machine_state(self, state):
+        """
+        Write machine state ke PLC
+        
+        Args:
+            state: 0=idle, 1=running, 2=paused, 3=error
+        
+        Returns:
+            bool: True jika sukses, False jika gagal
+        """
+        # Validasi state
+        state = max(0, min(3, state))
+        
+        try:
+            # Cari alamat untuk machine state (sesuaikan dengan konfigurasi PLC Anda)
+            # Contoh: mungkin di address 2567 atau lainnya
+            machine_state_address = 2567  # Sesuaikan dengan konfigurasi PLC
+            
+            result = self.client.write_register(
+                machine_state_address,
+                state,
+                unit=self.unit_id
+            )
+            
+            if result.isError():
+                print(f"[PLC] Write machine state failed: {result}")
+                return False
+            else:
+                # print(f"[PLC] Machine state written: {state}")
+                return True
+                
+        except Exception as e:
+            print(f"[PLC] Exception in write_machine_state: {e}")
+            return False
+
+    def write_all_data(self, machine_state, servo1, servo2, servo3):
+        """
+        Write semua data ke PLC dalam satu operasi
+        
+        Args:
+            machine_state: 0=idle, 1=running, 2=paused, 3=error
+            servo1, servo2, servo3: nilai servo (0-1000)
+        
+        Returns:
+            bool: True jika sukses, False jika gagal
+        """
+        # Validasi input
+        servo1 = max(0, min(1000, servo1))
+        servo2 = max(0, min(1000, servo2))
+        servo3 = max(0, min(1000, servo3))
+        machine_state = max(0, min(3, machine_state))
+        
+        try:
+            # Method 1: Tulis semua dalam satu batch (jika PLC mendukung)
+            # Sesuaikan dengan format data PLC Anda
+            
+            # Contoh: Semua data sebagai integer
+            # payload = [machine_state, servo1, servo2, servo3]
+            # result = self.client.write_registers(2570, payload, unit=self.unit_id)
+            
+            # Method 2: Tulis satu per satu
+            success1 = self.write_machine_state(machine_state)
+            success2 = self.write_servo_positions(servo1, servo2, servo3)
+            
+            return success1 and success2
+            
+        except Exception as e:
+            print(f"[PLC] Exception in write_all_data: {e}")
+            return False
+
     def load_config(self):
         """Load konfigurasi dari file"""
         try:
