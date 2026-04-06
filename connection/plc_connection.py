@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject, Signal, QTimer
 from pymodbus.client.sync import ModbusTcpClient
 from pymodbus.exceptions import ModbusException
 # try github
+# second try
 
 class PLCConnection(QObject):
     """Industrial PLC Connection dengan 3-level monitoring"""
